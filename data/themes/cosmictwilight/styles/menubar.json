@@ -1,0 +1,20 @@
+{
+  "colors": {
+    "menu_background": "#505050",
+    "menu_hover": "#444444",
+    "dropdown_background": "#3a3a3a",
+    "dropdown_active": "#505050",
+    "text_primary": "white"
+  },
+  "fonts": {
+    "primary_family": "Segoe UI",
+    "base_size": 10
+  },
+  "icons": {
+    "controller": "data/themes/cosmictwilight/images/controller.png",
+    "home": "data/themes/cosmictwilight/images/home.png",
+    "settings": "data/themes/cosmictwilight/images/settings.png"
+  }
+}
+
+

@@ -1,0 +1,22 @@
+{
+  "background": "#2e2e2e",
+  "foreground": "#d4d4d4", 
+  "accent": "#8e44ad",    
+  "button_bg": "#3c3c3c",  
+  "button_fg": "#d4d4d4",
+  "button_active_bg": "#555555",
+  "button_active_fg": "#ffffff",
+  "category_button_bg": "#4a4a4a",
+  "category_button_fg": "#ffffff",
+  "category_button_active_bg": "#636363",
+  "category_button_active_fg": "#ffffff",
+  "search_bg": "#3c3c3c",
+  "search_fg": "#d4d4d4",
+  "item_bg": "#353535",
+  "item_name_fg": "#ffffff",
+  "item_description_fg": "#b3b3b3",
+  "download_button_bg": "#8e44ad",
+  "download_button_fg": "#ffffff",
+  "download_button_active_bg": "#a957c6",
+  "download_button_active_fg": "#ffffff"
+}

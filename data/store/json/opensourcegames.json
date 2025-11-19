@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Pingus",
+    "description": "Lemmings type clone.",
+    "download_url": "https://github.com/electricwildflower/lgc-scripts/blob/main/opensourcegames/Pingus/pingus.sh",
+    "icon": "https://github.com/electricwildflower/lgc-scripts/blob/main/opensourcegames/Pingus/pingus.png"
+  },
+  {
+    "name": "test",
+    "description": "example description",
+    "download_url": "...",
+    "icon": "example.png"
+  },
+{
+    "name": "test",
+    "description": "example description",
+    "download_url": "...",
+    "icon": "example.png"
+  }
+]

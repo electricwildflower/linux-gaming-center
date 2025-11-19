@@ -1,0 +1,20 @@
+[
+{
+    "name": "test",
+    "description": "example description",
+    "download_url": "...",
+    "icon": "example.png"
+  },
+{
+    "name": "test",
+    "description": "example description",
+    "download_url": "...",
+    "icon": "example.png"
+  },
+{
+    "name": "test",
+    "description": "example description",
+    "download_url": "...",
+    "icon": "example.png"
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "theme_name": "cosmictwilight",
+  "version": "1.0",
+  "colors": {
+    "primary_background": "#1e1e1e",
+    "secondary_background": "#2e2e2e",
+    "tertiary_background": "#3e3e3e",
+    "accent_color": "#9a32cd",
+    "accent_hover": "#7d26cd",
+    "text_primary": "#ffffff",
+    "text_secondary": "#d4d4d4",
+    "text_muted": "#b3b3b3",
+    "button_background": "#3c3c3c",
+    "button_hover": "#555555",
+    "button_active": "#636363",
+    "border_color": "#555555",
+    "success_color": "#4caf50",
+    "warning_color": "#ff9800",
+    "error_color": "#f44336",
+    "info_color": "#2196f3"
+  },
+  "fonts": {
+    "primary_family": "Segoe UI",
+    "secondary_family": "Arial",
+    "monospace_family": "Consolas",
+    "base_size": 11,
+    "title_size": 16,
+    "large_size": 14,
+    "small_size": 9
+  },
+  "spacing": {
+    "small": 5,
+    "medium": 10,
+    "large": 20,
+    "extra_large": 30
+  },
+  "border_radius": 4,
+  "button_padding": [8, 12],
+  "input_padding": [6, 8]
+}
