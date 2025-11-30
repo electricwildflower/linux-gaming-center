@@ -1,0 +1,53 @@
+{
+  "consoles": [
+    {
+      "full_name": "Sony Playstation 2",
+      "short_name": "ps2"
+    },
+    {
+      "full_name": "Sony Playstation",
+      "short_name": "ps1"
+    },
+    {
+      "full_name": "Nintendo GameCube",
+      "short_name": "gamecube"
+    },
+    {
+      "full_name": "Nintendo 64",
+      "short_name": "n64"
+    },
+    {
+      "full_name": "Super Nintendo Entertainment System",
+      "short_name": "snes"
+    },
+    {
+      "full_name": "Nintendo Entertainment System",
+      "short_name": "nes"
+    },
+    {
+      "full_name": "Sega Dreamcast",
+      "short_name": "dreamcast"
+    },
+    {
+      "full_name": "Sega Saturn",
+      "short_name": "saturn"
+    },
+    {
+      "full_name": "Sega Genesis",
+      "short_name": "genesis"
+    },
+    {
+      "full_name": "Atari 2600",
+      "short_name": "atari2600"
+    },
+    {
+      "full_name": "Commodore 64",
+      "short_name": "c64"
+    },
+    {
+      "full_name": "Amiga",
+      "short_name": "amiga"
+    }
+  ]
+}
+

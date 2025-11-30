@@ -1,0 +1,97 @@
+{
+  "name": "Cosmic Twilight",
+  "version": "1.0.0",
+  "description": "The official default theme for Linux Gaming Center",
+  "colors": {
+    "background": "#000000",
+    "background_secondary": "#1A1A1A",
+    "background_tertiary": "#2D2D2D",
+    "primary": "#9D4EDD",
+    "primary_hover": "#7B2CBF",
+    "secondary": "#C77DFF",
+    "secondary_hover": "#9D4EDD",
+    "accent": "#9D4EDD",
+    "accent_hover": "#7B2CBF",
+    "danger": "#E74C3C",
+    "danger_hover": "#C0392B",
+    "warning": "#FF9800",
+    "success": "#9D4EDD",
+    "info": "#C77DFF",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "#E0E0E0",
+    "text_muted": "#9E9E9E",
+    "text_dark": "#000000",
+    "text_success": "#9D4EDD",
+    "text_error": "#E74C3C",
+    "text_warning": "#FF9800",
+    "border": "#424242",
+    "header": "#1A1A1A",
+    "menu_bar": "#2D2D2D",
+    "input_background": "#2D2D2D",
+    "input_text": "#FFFFFF",
+    "input_border": "#424242"
+  },
+  "fonts": {
+    "title": {
+      "family": "Arial",
+      "size": 32,
+      "style": "bold"
+    },
+    "heading": {
+      "family": "Arial",
+      "size": 28,
+      "style": "bold"
+    },
+    "subheading": {
+      "family": "Arial",
+      "size": 24,
+      "style": "bold"
+    },
+    "body_large": {
+      "family": "Arial",
+      "size": 18,
+      "style": "normal"
+    },
+    "body": {
+      "family": "Arial",
+      "size": 14,
+      "style": "normal"
+    },
+    "body_small": {
+      "family": "Arial",
+      "size": 12,
+      "style": "normal"
+    },
+    "body_tiny": {
+      "family": "Arial",
+      "size": 10,
+      "style": "normal"
+    },
+    "button": {
+      "family": "Arial",
+      "size": 14,
+      "style": "normal"
+    },
+    "button_small": {
+      "family": "Arial",
+      "size": 12,
+      "style": "normal"
+    },
+    "label": {
+      "family": "Arial",
+      "size": 14,
+      "style": "normal"
+    },
+    "notice": {
+      "family": "Arial",
+      "size": 12,
+      "style": "bold"
+    },
+    "notice_small": {
+      "family": "Arial",
+      "size": 12,
+      "style": "normal"
+    }
+  }
+}
+

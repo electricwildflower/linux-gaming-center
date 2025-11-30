@@ -1,834 +1,1244 @@
+#!/usr/bin/env python3
+"""
+Linux Gaming Center - Apps Frame
+App library similar to Jellyfin's movie library
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk, Menu
+from pathlib import Path
 import json
 import os
-import shutil
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 import subprocess
-import datetime
-from PIL import Image
+import shutil
+from datetime import datetime
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from path_helper import get_data_base_path, get_user_account_dir, get_config_file_path
+
+# Try to import PIL for image handling
 try:
-    from PIL import ImageTk
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
 except ImportError:
-    # Fallback for systems where ImageTk is not available
-    import tkinter as tk
-    class ImageTk:
-        @staticmethod
-        def PhotoImage(image):
-            return tk.PhotoImage()
-from pathlib import Path # NEW: Import Path for consistency
-
-# NEW: Import the PathManager
-from paths import PathManager
-
-BUTTON_WIDTH = 200
-BUTTON_HEIGHT = 150
-BUTTON_PADDING = 20
-FRAME_PADDING = 20
-IMAGE_PADDING = 10
+    PIL_AVAILABLE = False
 
 
-class AppsFrame(ttk.Frame):
-    def __init__(self, parent, controller, path_manager):
-        super().__init__(parent)
-
-        self.controller = controller
-        # NEW: Get the path_manager instance from the controller
-        self.path_manager = path_manager
-
-        self.icons = []
-        self.apps_data = []
-        self.app_widgets = []
-        self.theme = self.load_theme() # load_theme will now use path_manager
-        self.configure_style()
-
-        self.last_width = 0
-        self.initial_load_complete = False
-        self.current_menu = None
-
-        self["style"] = "App.TFrame"
-        self.bind("<Visibility>", self.on_visibility_change)
-
-        self.controller.bind("<Configure>", self.on_main_window_configure)
-
-        self.setup_ui()
-        self.load_apps() # load_apps will now use path_manager
-        self.after(200, self.perform_initial_redraw)
-
-    def setup_ui(self):
-        controls_frame = ttk.Frame(self, style="App.TFrame")
-        controls_frame.pack(fill="x", padx=10, pady=10)
-
-        add_button = ttk.Button(
-            controls_frame,
-            text="Add App",
-            style="App.TButton",
-            command=self.open_add_app_dialog,
+class AppsFrame:
+    def __init__(self, parent, theme, scaler, username=None):
+        self.parent = parent
+        self.theme = theme
+        self.scaler = scaler
+        self.username = username
+        
+        # Base directory for apps (shared across all users)
+        data_base = get_data_base_path()
+        self.apps_base_dir = data_base / "apps"
+        self.apps_json_path = self.apps_base_dir / "apps.json"
+        
+        # Per-user recently used apps directory
+        if username:
+            self.user_account_dir = get_user_account_dir(username)
+            self.user_account_dir.mkdir(parents=True, exist_ok=True)
+            self.recently_used_file = self.user_account_dir / "recently_used.json"
+        else:
+            self.recently_used_file = None
+        
+        # Ensure base directory exists
+        self.apps_base_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize apps.json if it doesn't exist
+        if not self.apps_json_path.exists():
+            self._init_apps_json()
+        
+        bg_color = self.theme.get_color("background", "#000000")
+        text_color = self.theme.get_color("text_primary", "#FFFFFF")
+        
+        self.frame = tk.Frame(parent, bg=bg_color)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Top bar with Add App button
+        top_bar = tk.Frame(self.frame, bg=bg_color)
+        top_bar.pack(fill=tk.X, padx=self.scaler.scale_padding(20), pady=self.scaler.scale_padding(20))
+        
+        # Check if user is admin
+        is_admin = self.is_admin()
+        
+        # Check if add button should be shown (admins always see it)
+        show_add_button = True
+        if not is_admin:
+            config_file = get_config_file_path("library_config.json")
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                    show_add_button = config.get("show_add_button_apps", True)
+                except:
+                    pass
+        
+        # Add App button (top left) - only show if enabled (or if admin)
+        button_font = self.theme.get_font("button", scaler=self.scaler)
+        primary_color = self.theme.get_color("primary", "#9D4EDD")
+        self.add_app_button = tk.Button(
+            top_bar,
+            text="+ Add App",
+            font=button_font,
+            command=self.show_add_app_popup,
+            bg=primary_color,
+            fg=text_color,
+            cursor="hand2",
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=self.scaler.scale_padding(20),
+            pady=self.scaler.scale_padding(10)
         )
-        add_button.pack(side="left", padx=(0, 5))
-
-        sort_label = ttk.Label(controls_frame, text="Sort by:", style="SortLabel.TLabel")
-        sort_label.pack(side="left", padx=(5, 5))
-
-        sort_options = ["A to Z", "Z to A", "Date Added"]
-        self.sort_var = tk.StringVar(self)
-        self.sort_var.set(sort_options[2])
-
-        sort_dropdown = ttk.Combobox(
-            controls_frame,
+        if show_add_button:
+            self.add_app_button.pack(side=tk.LEFT)
+        else:
+            self.add_app_button.pack_forget()
+        
+        # Sort dropdown (next to Add App button)
+        label_font = self.theme.get_font("label", scaler=self.scaler)
+        sort_label = tk.Label(
+            top_bar,
+            text="Sort:",
+            font=label_font,
+            bg=bg_color,
+            fg=text_color
+        )
+        sort_label.pack(side=tk.LEFT, padx=(self.scaler.scale_padding(20), self.scaler.scale_padding(5)))
+        
+        # Sort options
+        self.sort_var = tk.StringVar(value="A to Z")
+        sort_options = ["A to Z", "Z to A", "Newest added", "Oldest added"]
+        
+        # Create styled combobox
+        input_bg = self.theme.get_color("input_background", "#1A1A1A")
+        input_text = self.theme.get_color("input_text", "#FFFFFF")
+        body_font = self.theme.get_font("body", scaler=self.scaler)
+        
+        sort_combobox = ttk.Combobox(
+            top_bar,
             textvariable=self.sort_var,
             values=sort_options,
             state="readonly",
-            style="Sort.TCombobox",
+            font=body_font,
+            width=15
         )
-        sort_dropdown.pack(side="left", padx=(5, 0))
-        sort_dropdown.bind("<<ComboboxSelected>>", self.sort_apps)
-
-        self.canvas = tk.Canvas(
-            self,
-            bg=self.theme.get("background", "#1e1e1e"),
-            highlightthickness=0
-        )
-        self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        self.grid_frame = ttk.Frame(self.canvas, style="App.TFrame")
-        self.grid_frame_id = self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
-
-        self.canvas.bind("<Configure>", self.on_canvas_resize)
-        self.bind_mousewheel_events()
-
-    def on_canvas_resize(self, event):
-        """Update canvas and grid width on resize."""
-        self.last_width = event.width
-        self.canvas.itemconfig(self.grid_frame_id, width=event.width)
-        self.after(100, self.redraw_grid)
-
-    def open_edit_app_dialog(self, index):
-        """Open dialog to edit the selected app."""
-        app_info = self.apps_data[index]
-        dialog = tk.Toplevel(self)
-        dialog.title(f"Edit App: {app_info['name']}")
-        dialog.configure(bg=self.theme.get("background", "#1e1e1e"))
-
-        dialog.transient(self) # Make dialog modal
-        dialog.grab_set()     # Grab all input events
-
-        def themed_label(master, text, row, col=0, sticky="w", padx=5, pady=5):
-            label = ttk.Label(master, text=text, style="App.TLabel")
-            label.grid(row=row, column=col, sticky=sticky, padx=padx, pady=pady)
-            return label
-
-        def themed_entry(master, var=None, row=0, col=1, columnspan=1, sticky="ew", padx=5, pady=5):
-            entry = ttk.Entry(master, textvariable=var) if var else ttk.Entry(master)
-            entry.grid(row=row, column=col, columnspan=columnspan, sticky=sticky, padx=padx, pady=5)
-            return entry
-
-        dialog.columnconfigure(1, weight=1) # Column for entries/buttons to expand
-
-        try:
-            # --- Name ---
-            themed_label(dialog, "App Name:", 0)
-            name_var = tk.StringVar(value=app_info["name"])
-            name_entry = themed_entry(dialog, name_var, row=0)
-
-            # --- Image ---
-            themed_label(dialog, "Current Image:", 1)
-            current_image_label = ttk.Label(
-                dialog,
-                text=os.path.basename(app_info.get("image", "No Image Selected")),
-                style="App.TLabel",
-            )
-            current_image_label.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-
-            themed_label(dialog, "Select New Image:", 2)
-            new_image_path_var = tk.StringVar()
-            new_image_entry = themed_entry(dialog, new_image_path_var, row=2)
-            ttk.Button(
-                dialog,
-                text="Browse",
-                style="App.TButton",
-                command=lambda: self.browse_image(new_image_path_var),
-            ).grid(row=2, column=2, padx=5)
-
-            # --- Run Command Edit Button ---
-            themed_label(dialog, "Run Command:", 3)
-            ttk.Button(
-                dialog,
-                text="Edit",
-                style="App.TButton",
-                command=lambda: self.open_script_for_editing(app_info.get("exec")),
-            ).grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
-
-
-            # --- Save Changes Button ---
-            def save_changes():
-                new_name = name_var.get().strip()
-                new_image_path = new_image_path_var.get()
-
-                if not new_name:
-                    messagebox.showerror("Error", "App Name is required.")
-                    return
-
-                old_name = app_info["name"]
-                old_image_path = app_info.get("image")
-                old_exec_path = app_info["exec"]
-
-                app_info["name"] = new_name
-
-                # Handle new image upload
-                if new_image_path:
-                    # MODIFIED: Use path_manager for IMAGE_DIR
-                    IMAGE_DIR = self.path_manager.get_path("data") / "apps" / "assets"
-                    os.makedirs(IMAGE_DIR, exist_ok=True)
-                    new_image_filename = os.path.basename(new_image_path)
-                    new_image_filepath = IMAGE_DIR / new_image_filename # Use Path object concatenation
-                    try:
-                        shutil.copy(new_image_path, new_image_filepath)
-                        app_info["image"] = str(new_image_filepath) # Store as string
-                        if old_image_path and Path(old_image_path).exists() and Path(old_image_path) != new_image_filepath: # Use Path for comparison
-                            os.remove(old_image_path)
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Error updating image: {e}")
-                        return
-
-                # Rename script file if name changed
-                # MODIFIED: Use path_manager for SCRIPT_DIR
-                SCRIPT_DIR = self.path_manager.get_path("data") / "apps" / "run"
-                new_exec_filename = f"{new_name.lower().replace(' ', '_')}.sh"
-                new_exec_path = SCRIPT_DIR / new_exec_filename # Use Path object concatenation
-
-                if Path(old_exec_path) != new_exec_path: # Use Path for comparison
-                    try:
-                        if Path(old_exec_path).exists(): # Use Path for exists check
-                            shutil.move(old_exec_path, new_exec_path)
-                        app_info["exec"] = str(new_exec_path) # Store as string
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Error renaming run script: {e}")
-                        return
-
-                # Save updated data to JSON
-                # MODIFIED: Use path_manager for DATA_FILE
-                DATA_FILE = self.path_manager.get_path("data") / "apps" / "apps.json"
-                try:
-                    with open(DATA_FILE, "w") as f:
-                        json.dump(self.apps_data, f, indent=4)
-                    self.force_redraw()
-                    dialog.destroy()
-                except Exception as e:
-                    messagebox.showerror("Error", f"Error saving app data: {e}")
-
-            ttk.Button(
-                dialog, text="Save Changes", style="App.TButton", command=save_changes
-            ).grid(row=4, column=0, columnspan=3, pady=10) # Adjusted row for new button
-
-            dialog.update_idletasks() # Ensure widgets are rendered and size calculated
-            x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
-            y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
-            dialog.geometry(f"+{x}+{y}")
-            dialog.wait_window()
-
-        except Exception as e:
-            # Catch any error during dialog creation and display it
-            messagebox.showerror("Error", f"An error occurred while opening the edit dialog: {e}")
-            import traceback
-            traceback.print_exc() # Print full traceback to console for debugging
-            dialog.destroy() # Close the potentially broken dialog
-
-
-    def browse_image(self, path_var):
-        file_path = filedialog.askopenfilename(
-            title="Select Image",
-            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif")]
-        )
-        if file_path:
-            path_var.set(file_path)
-
-    def open_script_for_editing(self, script_path):
-        """
-        Opens the specified shell script file in a graphical text editor.
-        Tries gedit first, then falls back to xdg-open.
-        """
-        # MODIFIED: Use Path object for exists check
-        if not script_path or not Path(script_path).exists():
-            messagebox.showwarning("File Not Found", f"Script file not found: {script_path}")
-            print(f"DEBUG: Script file does not exist at: {script_path}")
-            return
-
-        print(f"DEBUG: Attempting to open script: {script_path}")
-        try:
-            # Try to open with gedit, a common graphical text editor
-            subprocess.Popen(['gedit', script_path])
-            print(f"Opened {script_path} with gedit.")
-        except FileNotFoundError:
-            # If gedit is not found, fall back to xdg-open
-            try:
-                subprocess.Popen(['xdg-open', script_path])
-                print(f"Opened {script_path} with xdg-open (gedit not found).")
-            except FileNotFoundError:
-                messagebox.showerror("Error", "Could not find 'gedit' or 'xdg-open'. Please ensure one is installed and in your PATH, or configure a default editor.")
-                print("ERROR: Neither 'gedit' nor 'xdg-open' found in PATH.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to open script '{os.path.basename(script_path)}' with xdg-open: {e}")
-                print(f"ERROR: Failed to open script {script_path} with xdg-open: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open script '{os.path.basename(script_path)}' with gedit: {e}")
-            print(f"ERROR: Failed to open script {script_path} with gedit: {e}")
-
-
-    def load_run_command(self, script_path):
-        """Load the run command from the app's .sh script."""
-        # This method is no longer directly used for displaying in GUI,
-        # but might be useful for internal logic if needed.
-        # MODIFIED: Use Path object for exists check
-        if not Path(script_path).exists():
-            print(f"Warning: Script not found at {script_path}")
-            return ""
-        try:
-            with open(script_path, "r") as f:
-                lines = f.readlines()
-                if len(lines) > 1:
-                    return lines[1].strip()
-        except FileNotFoundError:
-            print(f"Warning: Script not found at {script_path}")
-        except Exception as e:
-            print(f"Error reading script {script_path}: {e}")
-        return ""
-
-    def perform_initial_redraw(self):
-        """Perform initial redraw after a delay."""
-        self.initial_load_complete = True
-        self.force_redraw()
-
-    def on_main_window_configure(self, event=None):
-        """Handle the main window's resize event."""
-        try:
-            if not self.winfo_exists():
-                return
-            current_width = self.winfo_width()
-            if current_width > 0 and current_width != self.last_width:
-                self.last_width = current_width
-                self.after(100, self.delayed_redraw)
-        except tk.TclError:
-            # Widget has been destroyed, ignore
-            pass
-
-    def on_visibility_change(self, event=None):
-        """Handle frame becoming visible"""
-        try:
-            if not self.winfo_exists():
-                return
-            current_width = self.winfo_width()
-            if current_width > 0 and current_width != self.last_width:
-                self.last_width = current_width
-                self.after(100, self.delayed_redraw)
-        except tk.TclError:
-            # Widget has been destroyed, ignore
-            pass
-
-    def delayed_redraw(self):
-        """Delayed call to force redraw."""
-        self.force_redraw()
-
-    def force_redraw(self):
-        """Force a complete redraw of the grid"""
-        canvas_width = self.winfo_width()
-        self.canvas.config(width=canvas_width)
-
-        for button_frame in self.app_widgets:
-            button_frame.destroy()
-        self.app_widgets = []
-        self.icons = []
-
-        if hasattr(self, "grid_frame"):
-            self.grid_frame.destroy()
-
-        self.grid_frame = ttk.Frame(self.canvas, style="App.TFrame")
-        self.grid_frame_id = self.canvas.create_window(
-            (0, 0), window=self.grid_frame, anchor="nw"
-        )
-
-        for entry in self.apps_data:
-            self.add_app_icon(entry)
-
-        self.redraw_grid()
-
-        self.grid_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
-        self.canvas.config(scrollregion=self.canvas.bbox("all"))
-
-        self.update()
-        self.update_idletasks()
-
-    def load_theme(self):
-        """Load theme settings from JSON file"""
-        # MODIFIED: Use path_manager to get the themes directory
-        theme_file_path = self.path_manager.get_path("themes") / "cosmictwilight" / "styles" / "apps.json"
-        if theme_file_path.exists(): # Use Path object's exists()
-            with open(theme_file_path, "r") as f:
-                return json.load(f)
-        return {
-            "background": "#1e1e1e",
-            "text_color": "#ffffff",
-            "font_family": "Segoe UI",
-            "font_size": 11,
-        }
-
-    def configure_style(self):
-        """Configure ttk styles based on theme"""
+        sort_combobox.pack(side=tk.LEFT)
+        sort_combobox.bind("<<ComboboxSelected>>", lambda e: self.load_apps())
+        
+        # Style the combobox
         style = ttk.Style()
-        bg = self.theme.get("background", "#1e1e1e")
-        fg = self.theme.get("text_color", "#ffffff")
-        font_family = self.theme.get("font_family", "Segoe UI")
-        font_size = self.theme.get("font_size", 11)
-
-        style.configure("App.TFrame", background=bg)
-        style.configure(
-            "App.TLabel",
-            background=bg,
-            foreground=fg,
-            font=(font_family, font_size),
-            anchor="center",
+        style.theme_use('clam')
+        style.configure('TCombobox',
+            fieldbackground=input_bg,
+            background=input_bg,
+            foreground=input_text,
+            borderwidth=1,
+            relief=tk.SOLID
         )
-        style.configure(
-            "App.TButton",
-            background=bg,
-            foreground=fg,
-            font=(font_family, font_size + 1),
-            padding=6,
+        style.map('TCombobox',
+            fieldbackground=[('readonly', input_bg)],
+            background=[('readonly', input_bg)],
+            foreground=[('readonly', input_text)]
         )
-        style.configure(
-            "Sort.TCombobox",
-            background=bg,
-            foreground=fg,
-            font=(font_family, font_size),
-        )
-        style.configure(
-            "SortLabel.TLabel",
-            background=bg,
-            foreground=fg,
-            font=(font_family, font_size),
-            anchor="w",
-        )
-
-    def bind_mousewheel_events(self):
-        """Bind mouse wheel events for cross-platform compatibility"""
-        self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
-        self.canvas.bind_all("<Button-4>", lambda e: self.on_mousewheel_scroll(-1))
-        self.canvas.bind_all("<Button-5>", lambda e: self.on_mousewheel_scroll(1))
-        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
-
-    def on_mousewheel(self, event):
-        """Handle mouse wheel scrolling on Windows/Mac"""
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def on_mousewheel_scroll(self, direction):
-        """Handle mouse wheel scrolling on Linux"""
-        self.canvas.yview_scroll(direction, "units")
-
-    def calculate_grid_layout(self, available_width):
-        """Calculate optimal grid layout based on available width"""
-        if available_width <= 0:
-            return 1, 0
-
-        min_item_width = BUTTON_WIDTH + BUTTON_PADDING
-        max_columns = max(1, (available_width - 2 * FRAME_PADDING) // min_item_width)
-
-        total_content_width = max_columns * min_item_width - BUTTON_PADDING
-        remaining_space = max(
-            0, available_width - total_content_width - 2 * FRAME_PADDING
-        )
-        extra_padding = remaining_space // (max_columns + 1)
-
-        return max_columns, extra_padding
-
-    def redraw_grid(self):
-        """Reorganize buttons in a grid based on current width"""
-        if not self.app_widgets:
-            return
-
-        canvas_width = self.canvas.winfo_width()
-        if canvas_width <= 0:
-            return
-
-        for widget in self.grid_frame.winfo_children():
-            widget.grid_forget()
-
-        columns, extra_padding = self.calculate_grid_layout(canvas_width)
-
-        for idx, button_frame in enumerate(self.app_widgets):
-            row = idx // columns
-            col = idx % columns
-
-            left_pad = (
-                FRAME_PADDING + extra_padding
-                if col == 0
-                else BUTTON_PADDING // 2 + extra_padding
-            )
-            right_pad = (
-                FRAME_PADDING + extra_padding
-                if col == columns - 1
-                else BUTTON_PADDING // 2 + extra_padding
-            )
-
-            button_frame.grid(
-                row=row, column=col, padx=(left_pad, right_pad), pady=10, sticky="nsew"
-            )
-
-        for col in range(columns):
-            self.grid_frame.columnconfigure(col, weight=1, uniform="app_cols")
-
-        rows = (len(self.app_widgets) + columns - 1) // columns
-        total_height = rows * (BUTTON_HEIGHT + 20)
-        self.grid_frame.config(height=total_height)
         
-        self.canvas.config(scrollregion=self.canvas.bbox("all"))
-        self.update_idletasks()
-
-    def open_add_app_dialog(self):
-        """Create dialog for adding new app"""
-        dialog = tk.Toplevel(self)
-        dialog.title("Add App")
-        dialog.configure(bg=self.theme.get("background", "#1e1e1e"))
-
-        dialog.transient(self) # Make dialog modal
-        dialog.grab_set()     # Grab all input events
-
-        def themed_label(master, text, row):
-            label = ttk.Label(master, text=text, style="App.TLabel")
-            label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-            return label
-
-        def themed_entry(master, var=None, row=0, col=1, columnspan=1): # Corrected: 'colspan' to 'columnspan'
-            entry = ttk.Entry(master, textvariable=var) if var else ttk.Entry(master)
-            entry.grid(
-                row=row, column=col, columnspan=columnspan, sticky="ew", padx=5, pady=5
-            )
-            return entry
-
-        dialog.columnconfigure(1, weight=1)
-
-        themed_label(dialog, "App Name:", 0)
-        name_entry = themed_entry(dialog, row=0)
-
-        themed_label(dialog, "Select Image:", 1)
-        image_path_var = tk.StringVar()
-        image_entry = themed_entry(dialog, image_path_var, row=1)
-        ttk.Button(
-            dialog,
-            text="Browse",
-            style="App.TButton",
-            command=lambda: self.browse_image(image_path_var),
-        ).grid(row=1, column=2, padx=5)
-
-        # --- Informative Text for .sh files ---
-        # MODIFIED: Use path_manager for the example path
-        SCRIPT_DIR_EXAMPLE = self.path_manager.get_path("data") / "apps" / "run"
-        info_label = ttk.Label(
-            dialog,
-            text=f"Please add run commands for apps under:\n{SCRIPT_DIR_EXAMPLE}",
-            style="App.TLabel",
-            wraplength=300, # Adjust as needed
-            justify="left"
-        )
-        info_label.grid(row=2, column=0, columnspan=3, padx=5, pady=10, sticky="w")
-
-
-        def save():
-            name = name_entry.get().strip()
-            image_path = image_path_var.get()
-            
-            # Default placeholder command for new apps
-            run_command = "#!/bin/bash\n# Add your app launch command here.\n# Example: /usr/bin/firefox"
-
-            if not name or not image_path:
-                messagebox.showerror("Error", "App Name and Image are required.")
-                return
-
-            # MODIFIED: Use path_manager for IMAGE_DIR and SCRIPT_DIR
-            IMAGE_DIR = self.path_manager.get_path("data") / "apps" / "assets"
-            SCRIPT_DIR = self.path_manager.get_path("data") / "apps" / "run"
-
-            os.makedirs(IMAGE_DIR, exist_ok=True)
-            os.makedirs(SCRIPT_DIR, exist_ok=True)
-
-            new_image_path = IMAGE_DIR / os.path.basename(image_path) # Use Path object concatenation
-            shutil.copy(image_path, new_image_path)
-
-            script_filename = f"{name.lower().replace(' ', '_')}.sh"
-            script_path = SCRIPT_DIR / script_filename # Use Path object concatenation
-            with open(script_path, "w") as script_file:
-                script_file.write(f"{run_command}\n") # Write the placeholder content
-            os.chmod(script_path, 0o755)
-
-            new_entry = {"name": name, "image": str(new_image_path), "exec": str(script_path)} # Store as strings
-
-            # Load existing data
-            # MODIFIED: Use path_manager for DATA_FILE
-            DATA_FILE = self.path_manager.get_path("data") / "apps" / "apps.json"
-            if DATA_FILE.exists(): # Use Path object's exists()
-                with open(DATA_FILE, "r") as f:
-                    content = f.read().strip()
-                    if content:
-                        data = json.loads(content)
-                    else:
-                        data = []
+        # Scrollable canvas for app grid (no scrollbar)
+        canvas_frame = tk.Frame(self.frame, bg=bg_color)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=self.scaler.scale_padding(20), pady=(0, self.scaler.scale_padding(20)))
+        
+        # Create scrollable canvas
+        self.canvas = tk.Canvas(canvas_frame, bg=bg_color, highlightthickness=0)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=bg_color)
+        
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        def configure_scroll_region(event=None):
+            # Update the scroll region
+            self.canvas.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if bbox:
+                # Add padding to ensure we can scroll to the bottom
+                self.canvas.configure(scrollregion=(0, 0, bbox[2], bbox[3] + 50))
+            # Set scrollable frame width to match canvas for proper grid layout
+            if event:
+                canvas_width = event.width
+                if canvas_width > 0:
+                    # Set width to match canvas so grid can use full width
+                    self.canvas.itemconfig(self.canvas_window, width=canvas_width)
             else:
-                data = []
-
-            data.append(new_entry)
-
-            with open(DATA_FILE, "w") as f:
-                json.dump(data, f, indent=4)
-
-            self.apps_data = data
-            self.sort_apps()
-            dialog.destroy()
-
-        ttk.Button(dialog, text="Save", style="App.TButton", command=save).grid(
-            row=3, column=0, columnspan=3, pady=10 # Adjusted row for new info label
-        )
-
-        dialog.update_idletasks() # Ensure widgets are rendered and size calculated
-        x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        dialog.wait_window()
-
-    def load_apps(self):
-        """Load apps from JSON file and apply initial sorting"""
-        # MODIFIED: Use path_manager for DATA_FILE
-        DATA_FILE = self.path_manager.get_path("data") / "apps" / "apps.json"
-        if not DATA_FILE.exists(): # Use Path object's exists()
-            print(f"Info: {DATA_FILE} not found. Initializing with empty app data.")
-            self.apps_data = []
-            return
+                # Initial setup - get canvas width
+                self.canvas.update_idletasks()
+                canvas_width = self.canvas.winfo_width()
+                if canvas_width > 1:  # Only if canvas has been rendered
+                    self.canvas.itemconfig(self.canvas_window, width=canvas_width)
+        
+        self.scrollable_frame.bind("<Configure>", configure_scroll_region)
+        
+        def configure_canvas(event):
+            # Update scrollable frame width to match canvas when canvas is resized
+            canvas_width = event.width
+            if canvas_width > 0:
+                self.canvas.itemconfig(self.canvas_window, width=canvas_width)
+            # Update scroll region
+            configure_scroll_region()
+        
+        self.canvas.bind("<Configure>", configure_canvas)
+        
+        # Configure grid columns - don't set weight, let content determine size
+        # We'll configure columns dynamically when apps are loaded
+        
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Improved mousewheel scrolling - bind to both canvas and scrollable_frame
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.scrollable_frame.bind("<MouseWheel>", self._on_mousewheel)
+        # Linux mousewheel support with bounds checking
+        def scroll_up(e):
+            if self.canvas.yview()[0] > 0.0:
+                self.canvas.yview_scroll(-3, "units")
+        
+        def scroll_down(e):
+            if self.canvas.yview()[1] < 1.0:
+                self.canvas.yview_scroll(3, "units")
+        
+        self.canvas.bind("<Button-4>", scroll_up)
+        self.canvas.bind("<Button-5>", scroll_down)
+        self.scrollable_frame.bind("<Button-4>", scroll_up)
+        self.scrollable_frame.bind("<Button-5>", scroll_down)
+        
+        # Also bind to frame for better coverage
+        self.frame.bind("<MouseWheel>", self._on_mousewheel)
+        self.frame.bind("<Button-4>", scroll_up)
+        self.frame.bind("<Button-5>", scroll_down)
+        
+        # Current sort order
+        self.current_sort = "A to Z"
+        
+        # Load and display apps
+        self.load_apps()
+    
+    def _on_mousewheel(self, event):
+        """Handle mousewheel scrolling with improved sensitivity"""
+        # Windows and Mac
+        if event.delta:
+            # More sensitive scrolling
+            scroll_amount = int(-1 * (event.delta / 40))
+            # Check if we can scroll in that direction
+            if scroll_amount < 0:  # Scrolling down
+                # Check if we're at the bottom
+                if self.canvas.yview()[1] < 1.0:
+                    self.canvas.yview_scroll(scroll_amount, "units")
+            else:  # Scrolling up
+                # Check if we're at the top
+                if self.canvas.yview()[0] > 0.0:
+                    self.canvas.yview_scroll(scroll_amount, "units")
+        # Linux (handled by Button-4/5 bindings)
+    
+    def _init_apps_json(self):
+        """Initialize apps.json with empty list"""
+        with open(self.apps_json_path, 'w') as f:
+            json.dump({"apps": []}, f, indent=2)
+    
+    def to_relative_path(self, absolute_path):
+        """Convert an absolute path to a relative path (relative to data base)"""
+        if not absolute_path:
+            return ""
+        abs_path = Path(absolute_path)
+        data_base = get_data_base_path()
         try:
-            with open(DATA_FILE, "r") as f:
-                content = f.read().strip()
-                if not content:
-                    print(f"Info: {DATA_FILE} is empty. Initializing with empty app data.")
-                    self.apps_data = []
-                else:
-                    self.apps_data = json.loads(content)
-            self.sort_apps()
-        except json.JSONDecodeError as e:
-            print(f"Error: Malformed JSON in {DATA_FILE}: {e}. Initializing with empty app data.")
-            print("Please check or delete the 'apps.json' file if this error persists.")
-            self.apps_data = []
-        except Exception as e:
-            print(f"An unexpected error occurred while loading {DATA_FILE}: {e}. Initializing with empty app data.")
-            self.apps_data = []
-
-    def sort_apps(self, event=None):
-        """Sort the apps data and redraw the grid based on the selected option."""
-        selected_sort = self.sort_var.get()
-
-        if selected_sort == "A to Z":
-            self.apps_data.sort(key=lambda item: item["name"].lower())
-        elif selected_sort == "Z to A":
-            self.apps_data.sort(key=lambda item: item["name"].lower(), reverse=True)
-        elif selected_sort == "Date Added":
-            pass
-
-        for widget in self.app_widgets:
-            widget.destroy()
-        self.app_widgets = []
-        self.icons = []
-        for entry in self.apps_data:
-            self.add_app_icon(entry)
-        self.force_redraw()
-
-    def show_context_menu(self, event, index):
-        if self.current_menu:
-            self.current_menu.unpost()
-
-        menu = tk.Menu(self, tearoff=0, bg=self.theme.get("background", "#1e1e1e"), fg=self.theme.get("text_color", "#ffffff"))
-        menu.add_command(label="Edit App", command=lambda: self.open_edit_app_dialog(index))
-        menu.add_separator()
-        menu.add_command(label="Delete App", command=lambda: self.delete_app(index))
-
-        self.current_menu = menu
-        menu.tk_popup(event.x_root, event.y_root)
-
-        self.controller.bind("<Button-1>", self.close_context_menu, add="+")
-
-    def on_menu_dismiss(self):
-        """Handle menu being dismissed"""
-        if hasattr(self, "current_menu") and self.current_menu:
-            self.current_menu.destroy()
-            self.current_menu = None
-        self.controller.unbind("<Button-1>")
-
-    def close_context_menu(self, event=None):
-        """Close the context menu if it's open"""
-        if hasattr(self, "current_menu") and self.current_menu:
-            self.current_menu.destroy()
-            self.current_menu = None
-        self.controller.unbind("<Button-1>")
-
-    def delete_app(self, index):
-        app = self.apps_data[index]
-        confirm = messagebox.askyesno("Delete App", f"Are you sure you want to delete '{app['name']}'?")
-        if not confirm:
-            return
-
-        # MODIFIED: Use Path object for exists check
-        if Path(app["image"]).exists():
-            try:
-                os.remove(app["image"])
-            except Exception as e:
-                print(f"Failed to remove image: {e}")
-
-        # MODIFIED: Use Path object for exists check
-        if Path(app["exec"]).exists():
-            try:
-                os.remove(app["exec"])
-            except Exception as e:
-                print(f"Failed to remove exec script: {e}")
-
-        del self.apps_data[index]
-        # MODIFIED: Use path_manager for DATA_FILE
-        DATA_FILE = self.path_manager.get_path("data") / "apps" / "apps.json"
-        try:
-            with open(DATA_FILE, "w") as f:
-                json.dump(self.apps_data, f, indent=4)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save updated data: {e}")
-            return
-
-        self.force_redraw()
-
-    def add_app_icon(self, entry):
-        """Add app button to the grid"""
-        try:
-            # MODIFIED: Use Path object for exists check
-            if not Path(entry["image"]).exists():
-                print(f"Warning: Image file not found for app '{entry['name']}' at '{entry['image']}'. Skipping image loading.")
-                # Optionally, use a placeholder image or just display text
-                img = Image.new('RGB', (BUTTON_WIDTH - IMAGE_PADDING * 2, BUTTON_HEIGHT - IMAGE_PADDING * 2 - 30), color = 'grey')
-                photo = ImageTk.PhotoImage(img)
-            else:
-                img = Image.open(entry["image"])
-                img = self.resize_image_to_fit(
-                    img,
-                    BUTTON_WIDTH - IMAGE_PADDING * 2,
-                    BUTTON_HEIGHT - IMAGE_PADDING * 2 - 30,
-                )
-                photo = ImageTk.PhotoImage(img)
-
-            self.icons.append(photo)
-
-            button_frame = ttk.Frame(self.grid_frame, style="App.TFrame")
-
-            img_label = ttk.Label(button_frame, image=photo, style="App.TLabel")
-            img_label.pack(pady=(0, 5))
-
-            text_label = ttk.Label(
-                button_frame,
-                text=entry["name"],
-                style="App.TLabel",
-                wraplength=BUTTON_WIDTH - 10,
-                justify="center",
-            )
-            text_label.pack()
-
-            button_frame.bind(
-                "<Button-1>", lambda e, path=entry["exec"]: self.run_app(path)
-            )
-            img_label.bind(
-                "<Button-1>", lambda e, path=entry["exec"]: self.run_app(path)
-            )
-            text_label.bind(
-                "<Button-1>", lambda e, path=entry["exec"]: self.run_app(path)
-            )
-
-            index = len(self.app_widgets)
-            img_label.bind(
-                "<Button-3>",
-                lambda event, idx=index: self.show_context_menu(event, idx),
-            )
-            text_label.bind(
-                "<Button-3>",
-                lambda event, idx=index: self.show_context_menu(event, idx),
-            )
-
-            self.app_widgets.append(button_frame)
-        except Exception as e:
-            print(f"Error loading app icon: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def resize_image_to_fit(self, img, target_width, target_height):
-        """Resize image maintaining aspect ratio to fit within target dimensions"""
-        img_ratio = img.width / img.height
-        target_ratio = target_width / target_height
-
-        if target_ratio > img_ratio:
-            new_height = target_height
-            new_width = int(img_ratio * new_height)
+            rel_path = abs_path.relative_to(data_base)
+            return str(rel_path)
+        except ValueError:
+            return str(absolute_path)
+    
+    def to_absolute_path(self, stored_path):
+        """Convert a stored path (relative or absolute) to an absolute path"""
+        if not stored_path:
+            return ""
+        path = Path(stored_path)
+        if path.is_absolute():
+            if path.exists():
+                return str(path)
+            path_str = str(path)
+            markers = ["/linux-gaming-center/data/", "linux-gaming-center/data/"]
+            for marker in markers:
+                if marker in path_str:
+                    rel_part = path_str.split(marker)[-1]
+                    data_base = get_data_base_path()
+                    new_path = data_base / rel_part
+                    if new_path.exists():
+                        return str(new_path)
+            return str(path)
         else:
-            new_width = target_width
-            new_height = int(new_width / img_ratio)
-
-        return img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-    def run_app(self, script_path):
-        """Execute the app script and update last_played."""
+            data_base = get_data_base_path()
+            return str(data_base / path)
+    
+    def load_apps_json(self):
+        """Load apps from apps.json"""
         try:
-            if os.name == 'nt':
-                subprocess.Popen(['cmd.exe', '/C', script_path], shell=True) # Use cmd.exe /C for Windows .bat/.exe
-            else:
-                subprocess.Popen(['sh', script_path])
-
-        except FileNotFoundError:
-            messagebox.showerror("Error", f"Script not found: {script_path}")
+            with open(self.apps_json_path, 'r') as f:
+                data = json.load(f)
+                return data.get("apps", [])
         except Exception as e:
-            messagebox.showerror("Error", f"Error running script: {e}")
-        finally:
-            for app in self.apps_data:
-                if app["exec"] == script_path:
-                    app["last_played"] = datetime.datetime.now().isoformat()
-                    self.save_apps()
-                    break
-            # Notify dashboard to update recently played apps
-            if "DashboardFrame" in self.controller.frames and self.controller.frames["DashboardFrame"]:
-                self.controller.frames["DashboardFrame"].update_dashboard()
-            else:
-                print("WARNING: DashboardFrame not found in controller.frames. Cannot update recently played apps on dashboard.")
-
-
-    def save_apps(self):
-        """Save the apps data to the JSON file."""
-        # MODIFIED: Use path_manager for DATA_FILE
-        DATA_FILE = self.path_manager.get_path("data") / "apps" / "apps.json"
+            print(f"Error loading apps.json: {e}")
+            return []
+    
+    def save_apps_json(self, apps_list):
+        """Save apps to apps.json"""
         try:
-            with open(DATA_FILE, "w") as f:
-                json.dump(self.apps_data, f, indent=4)
+            with open(self.apps_json_path, 'w') as f:
+                json.dump({"apps": apps_list}, f, indent=2)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save app data: {e}")
-
-    def get_recently_played_apps(self, num_items=15):
-        """Get a list of recently played apps, sorted by last_played.
-        Returns app data including name, image, and exec path.
-        """
-        played_apps = []
-        for app in self.apps_data:
-            if "last_played" in app:
-                try:
-                    app_copy = app.copy()
-                    app_copy["last_played_dt"] = datetime.datetime.fromisoformat(app["last_played"])
-                    played_apps.append(app_copy)
-                except ValueError:
-                    continue
+            print(f"Error saving apps.json: {e}")
+            messagebox.showerror("Error", f"Failed to save app: {e}")
+    
+    def show_add_app_popup(self):
+        """Show popup to add a new app"""
+        popup = tk.Toplevel(self.parent)
+        popup.title("Add New App")
         
-        played_apps.sort(
-            key=lambda x: x["last_played_dt"], reverse=True
+        # Scale popup size
+        popup_width = self.scaler.scale_dimension(500)
+        popup_height = self.scaler.scale_dimension(400)
+        popup.resizable(False, False)
+        
+        # Center on primary monitor
+        popup.transient(self.parent)
+        popup.grab_set()
+        
+        # Use the scaler instance we already have
+        x, y = self.scaler.center_on_primary_monitor(popup_width, popup_height)
+        popup.geometry(f'{popup_width}x{popup_height}+{x}+{y}')
+        
+        popup.update_idletasks()
+        
+        # Theme colors
+        bg_color = self.theme.get_color("background_secondary", "#1A1A1A")
+        text_color = self.theme.get_color("text_primary", "#FFFFFF")
+        text_secondary = self.theme.get_color("text_secondary", "#E0E0E0")
+        primary_color = self.theme.get_color("primary", "#9D4EDD")
+        input_bg = self.theme.get_color("input_background", "#1A1A1A")
+        input_text = self.theme.get_color("input_text", "#FFFFFF")
+        
+        popup.configure(bg=bg_color)
+        
+        # Variables
+        app_name_var = tk.StringVar()
+        app_image_path_var = tk.StringVar()
+        
+        # Title
+        heading_font = self.theme.get_font("heading", scaler=self.scaler)
+        title_label = tk.Label(
+            popup,
+            text="Add New App",
+            font=heading_font,
+            bg=bg_color,
+            fg=text_color
         )
-        # MODIFIED: Ensure SCRIPT_DIR is retrieved via path_manager for this return
-        SCRIPT_DIR_FOR_RETURN = self.path_manager.get_path("data") / "apps" / "run"
-        return [
-            dict(name=a["name"], last_played=a["last_played"], image=a.get("image"), exec=a["exec"], script_dir=str(SCRIPT_DIR_FOR_RETURN)) # Store as string
-            for a in played_apps[:num_items]
-        ]
-
+        title_label.pack(pady=(self.scaler.scale_padding(20), self.scaler.scale_padding(20)))
+        
+        # Form frame
+        form_frame = tk.Frame(popup, bg=bg_color)
+        form_frame.pack(padx=self.scaler.scale_padding(30), pady=self.scaler.scale_padding(10), fill=tk.BOTH, expand=True)
+        
+        # App name field
+        label_font = self.theme.get_font("label", scaler=self.scaler)
+        name_label = tk.Label(
+            form_frame,
+            text="App Name:",
+            font=label_font,
+            bg=bg_color,
+            fg=text_secondary,
+            anchor="w"
+        )
+        name_label.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(5)))
+        
+        body_font = self.theme.get_font("body", scaler=self.scaler)
+        name_entry = tk.Entry(
+            form_frame,
+            textvariable=app_name_var,
+            font=body_font,
+            bg=input_bg,
+            fg=input_text,
+            insertbackground=input_text,
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        name_entry.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(20)), ipady=self.scaler.scale_padding(5))
+        
+        # Image selection
+        image_label = tk.Label(
+            form_frame,
+            text="App Image:",
+            font=label_font,
+            bg=bg_color,
+            fg=text_secondary,
+            anchor="w"
+        )
+        image_label.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(5)))
+        
+        image_frame = tk.Frame(form_frame, bg=bg_color)
+        image_frame.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(20)))
+        
+        image_entry = tk.Entry(
+            image_frame,
+            textvariable=app_image_path_var,
+            font=body_font,
+            bg=input_bg,
+            fg=input_text,
+            insertbackground=input_text,
+            relief=tk.SOLID,
+            borderwidth=1,
+            state="readonly"
+        )
+        image_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=self.scaler.scale_padding(5))
+        
+        def browse_image():
+            file_path = filedialog.askopenfilename(
+                parent=popup,
+                title="Select App Image",
+                filetypes=[
+                    ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                    ("All files", "*.*")
+                ]
+            )
+            if file_path:
+                app_image_path_var.set(file_path)
+        
+        browse_button = tk.Button(
+            image_frame,
+            text="Browse",
+            font=body_font,
+            command=browse_image,
+            bg=text_secondary,
+            fg=text_color,
+            cursor="hand2",
+            relief=tk.FLAT,
+            padx=self.scaler.scale_padding(15),
+            pady=self.scaler.scale_padding(5)
+        )
+        browse_button.pack(side=tk.LEFT, padx=(self.scaler.scale_padding(10), 0))
+        
+        # Status label
+        status_label = tk.Label(
+            form_frame,
+            text="",
+            font=label_font,
+            bg=bg_color,
+            fg=self.theme.get_color("text_error", "#E74C3C")
+        )
+        status_label.pack(pady=(0, self.scaler.scale_padding(10)))
+        
+        def save_app():
+            app_name = app_name_var.get().strip()
+            image_path = app_image_path_var.get().strip()
+            
+            if not app_name:
+                status_label.config(text="Please enter an app name")
+                return
+            
+            if not image_path:
+                status_label.config(text="Please select an app image")
+                return
+            
+            # Create app directory structure
+            app_safe_name = "".join(c for c in app_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            app_safe_name = app_safe_name.replace(' ', '_')
+            app_dir = self.apps_base_dir / app_safe_name
+            assets_dir = app_dir / "assets"
+            run_dir = app_dir / "run"
+            
+            try:
+                # Create directories
+                assets_dir.mkdir(parents=True, exist_ok=True)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy image to assets folder
+                image_ext = Path(image_path).suffix
+                image_filename = f"app_image{image_ext}"
+                dest_image_path = assets_dir / image_filename
+                shutil.copy2(image_path, dest_image_path)
+                
+                # Create .sh file
+                sh_filename = f"{app_safe_name}.sh"
+                sh_file_path = run_dir / sh_filename
+                
+                # Create empty .sh file with a comment
+                with open(sh_file_path, 'w') as f:
+                    f.write(f"#!/bin/bash\n# Run script for {app_name}\n# Add your app launch commands below\n\n")
+                
+                # Make .sh file executable
+                os.chmod(sh_file_path, 0o755)
+                
+                # Load existing apps
+                apps_list = self.load_apps_json()
+                
+                # Add new app with timestamp - store relative paths for portability
+                new_app = {
+                    "name": app_name,
+                    "image": self.to_relative_path(str(dest_image_path)),
+                    "sh_file": self.to_relative_path(str(sh_file_path)),
+                    "app_dir": self.to_relative_path(str(app_dir)),
+                    "added_date": datetime.now().isoformat()
+                }
+                apps_list.append(new_app)
+                
+                # Save apps
+                self.save_apps_json(apps_list)
+                
+                # Close popup and reload apps
+                popup.destroy()
+                self.load_apps()
+                
+                messagebox.showinfo("Success", f"App '{app_name}' added successfully!\n\nPlease edit the .sh file at:\n{sh_file_path}\n\nto add your app launch commands.")
+                
+            except Exception as e:
+                status_label.config(text=f"Error: {str(e)}")
+                print(f"Error adding app: {e}")
+        
+        # Save button
+        button_font = self.theme.get_font("button", scaler=self.scaler)
+        save_button = tk.Button(
+            form_frame,
+            text="Save",
+            font=button_font,
+            command=save_app,
+            bg=primary_color,
+            fg=text_color,
+            cursor="hand2",
+            relief=tk.FLAT,
+            padx=self.scaler.scale_padding(30),
+            pady=self.scaler.scale_padding(10)
+        )
+        save_button.pack(pady=(self.scaler.scale_padding(10), 0))
+    
+    def sort_apps(self, apps_list, sort_order):
+        """Sort apps based on the selected sort order"""
+        if sort_order == "A to Z":
+            return sorted(apps_list, key=lambda x: x.get("name", "").lower())
+        elif sort_order == "Z to A":
+            return sorted(apps_list, key=lambda x: x.get("name", "").lower(), reverse=True)
+        elif sort_order == "Newest added":
+            # Sort by added_date descending (newest first)
+            # For apps without added_date, treat as very old
+            return sorted(apps_list, key=lambda x: x.get("added_date", "1970-01-01"), reverse=True)
+        elif sort_order == "Oldest added":
+            # Sort by added_date ascending (oldest first)
+            # For apps without added_date, treat as very old
+            return sorted(apps_list, key=lambda x: x.get("added_date", "1970-01-01"))
+        return apps_list
+    
+    def load_apps(self):
+        """Load and display all apps in a grid"""
+        # Clear existing widgets
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        # Load apps from JSON
+        apps = self.load_apps_json()
+        
+        # Sort apps based on current sort selection
+        sort_order = self.sort_var.get() if hasattr(self, 'sort_var') else "A to Z"
+        apps = self.sort_apps(apps, sort_order)
+        
+        if not apps:
+            # Show empty state
+            bg_color = self.theme.get_color("background", "#000000")
+            text_color = self.theme.get_color("text_primary", "#FFFFFF")
+            text_secondary = self.theme.get_color("text_secondary", "#E0E0E0")
+            
+            empty_label = tk.Label(
+                self.scrollable_frame,
+                text="No apps added yet.\nClick '+ Add App' to get started.",
+                font=self.theme.get_font("body", scaler=self.scaler),
+                bg=bg_color,
+                fg=text_secondary,
+                justify=tk.CENTER
+            )
+            empty_label.pack(pady=self.scaler.scale_padding(50))
+            return
+        
+        # Display apps in grid
+        bg_color = self.theme.get_color("background", "#000000")
+        text_color = self.theme.get_color("text_primary", "#FFFFFF")
+        menu_bar_color = self.theme.get_color("menu_bar", "#2D2D2D")
+        
+        # Grid configuration
+        items_per_row = 4
+        button_width = self.scaler.scale_dimension(350)  # Wider, more rectangular
+        button_height = self.scaler.scale_dimension(200)  # Keep height the same
+        button_padding = self.scaler.scale_padding(15)
+        
+        # Configure grid columns for proper layout
+        for col in range(items_per_row):
+            self.scrollable_frame.grid_columnconfigure(col, weight=0, minsize=button_width + (button_padding * 2))
+        
+        for i, app in enumerate(apps):
+            row = i // items_per_row
+            col = i % items_per_row
+            
+            # Create button frame
+            button_frame = tk.Frame(self.scrollable_frame, bg=bg_color)
+            button_frame.grid(row=row, column=col, padx=button_padding, pady=button_padding)
+            
+            # Load and display app image - resolve paths to handle custom locations
+            image_path = Path(self.to_absolute_path(app.get("image", "")))
+            app_name = app.get("name", "Unknown App")
+            sh_file = self.to_absolute_path(app.get("sh_file", ""))
+            
+            button = None
+            if image_path.exists() and PIL_AVAILABLE:
+                try:
+                    image = Image.open(image_path)
+                    image = image.resize((button_width, button_height), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    button = tk.Button(
+                        button_frame,
+                        image=photo,
+                        command=lambda sf=sh_file, an=app_name: self.run_app(sf, an),
+                        bg=menu_bar_color,
+                        cursor="hand2",
+                        relief=tk.FLAT,
+                        borderwidth=0,
+                        highlightthickness=0,
+                        activebackground=self.theme.get_color("background_secondary", "#1A1A1A")
+                    )
+                    button.image = photo  # Keep reference
+                    button.pack()
+                    
+                    # Add right-click context menu (prevent default button action on right-click)
+                    def on_right_click(event):
+                        # Stop event propagation
+                        event.widget.focus_set()
+                        # Capture event coordinates
+                        x_root = event.x_root
+                        y_root = event.y_root
+                        # Create a copy of app data to avoid closure issues
+                        app_data_copy = app.copy()
+                        # Create a simple event-like object with coordinates
+                        class MenuEvent:
+                            def __init__(self, x, y):
+                                self.x_root = x
+                                self.y_root = y
+                        menu_event = MenuEvent(x_root, y_root)
+                        # Show menu immediately - no delay needed
+                        self.show_app_context_menu(menu_event, app_data_copy)
+                        return "break"  # Prevent default button action
+                    
+                    button.bind("<Button-3>", on_right_click)
+                except Exception as e:
+                    print(f"Error loading app image {image_path}: {e}")
+                    # Fallback to text button
+                    button = tk.Button(
+                        button_frame,
+                        text=app_name,
+                        command=lambda sf=sh_file, an=app_name: self.run_app(sf, an),
+                        bg=menu_bar_color,
+                        fg=text_color,
+                        cursor="hand2",
+                        relief=tk.FLAT,
+                        width=self.scaler.scale_dimension(20),
+                        height=self.scaler.scale_dimension(10),
+                        font=self.theme.get_font("body_small", scaler=self.scaler)
+                    )
+                    button.pack()
+                    
+                    # Add right-click context menu (prevent default button action on right-click)
+                    def on_right_click(event):
+                        # Stop event propagation
+                        event.widget.focus_set()
+                        # Capture event coordinates
+                        x_root = event.x_root
+                        y_root = event.y_root
+                        app_data_copy = app.copy()
+                        # Create a simple event-like object with coordinates
+                        class MenuEvent:
+                            def __init__(self, x, y):
+                                self.x_root = x
+                                self.y_root = y
+                        menu_event = MenuEvent(x_root, y_root)
+                        # Show menu immediately - no delay needed
+                        self.show_app_context_menu(menu_event, app_data_copy)
+                        return "break"
+                    
+                    button.bind("<Button-3>", on_right_click)
+            else:
+                # Fallback to text button
+                button = tk.Button(
+                    button_frame,
+                    text=app_name,
+                    command=lambda sf=sh_file, an=app_name: self.run_app(sf, an),
+                    bg=menu_bar_color,
+                    fg=text_color,
+                    cursor="hand2",
+                    relief=tk.FLAT,
+                    width=self.scaler.scale_dimension(20),
+                    height=self.scaler.scale_dimension(10),
+                    font=self.theme.get_font("body_small", scaler=self.scaler)
+                )
+                button.pack()
+                
+                # Add right-click context menu (prevent default button action on right-click)
+                def on_right_click(event):
+                    event.widget.focus_set()  # Set focus to prevent button click
+                    app_data_copy = app.copy()
+                    self.show_app_context_menu(event, app_data_copy)
+                    return "break"
+                
+                button.bind("<Button-3>", on_right_click)
+            
+            # App name label below button
+            name_label = tk.Label(
+                button_frame,
+                text=app_name,
+                font=self.theme.get_font("body_small", scaler=self.scaler),
+                bg=bg_color,
+                fg=text_color,
+                wraplength=button_width
+            )
+            name_label.pack(pady=(self.scaler.scale_padding(5), 0))
+        
+        # Update canvas scroll region after loading apps
+        # Force update to ensure all widgets are rendered
+        self.scrollable_frame.update_idletasks()
+        self.canvas.update_idletasks()
+        
+        # Get the bounding box of all items in the canvas
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            # Add some padding to ensure we can scroll to the bottom
+            self.canvas.configure(scrollregion=(0, 0, bbox[2], bbox[3] + 50))
+        else:
+            # If no content, set a minimum scroll region
+            canvas_width = self.canvas.winfo_width() or 800
+            canvas_height = self.canvas.winfo_height() or 600
+            self.canvas.configure(scrollregion=(0, 0, canvas_width, canvas_height))
+        
+        # Ensure we start at the top
+        self.canvas.yview_moveto(0)
+    
+    def run_app(self, sh_file_path, app_name):
+        """Run the app's .sh file and track it as recently used"""
+        sh_path = Path(sh_file_path)
+        
+        if not sh_path.exists():
+            messagebox.showerror("Error", f"Script file not found:\n{sh_file_path}")
+            return
+        
+        try:
+            # Run the .sh file in the background
+            subprocess.Popen(
+                ["bash", str(sh_path)],
+                cwd=sh_path.parent,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            # Track as recently used
+            self.track_recently_used(sh_file_path, app_name)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run app '{app_name}':\n{str(e)}")
+            print(f"Error running app: {e}")
+    
+    def track_recently_used(self, sh_file_path, app_name):
+        """Track an app as recently used"""
+        try:
+            # Convert to relative path for storage and comparison
+            sh_file_relative = self.to_relative_path(sh_file_path)
+            
+            # Find the app in the apps list to get its full info
+            apps = self.load_apps_json()
+            app_info = None
+            for app in apps:
+                # Compare relative paths
+                if app.get("sh_file") == sh_file_relative:
+                    app_info = app.copy()
+                    break
+            
+            if not app_info:
+                # Create minimal app info if not found - use relative paths
+                app_info = {
+                    "name": app_name,
+                    "sh_file": sh_file_relative,
+                    "image": ""
+                }
+            
+            # Load recently used apps from user's account directory
+            if not self.recently_used_file:
+                return  # No username, can't track
+            
+            if self.recently_used_file.exists():
+                with open(self.recently_used_file, 'r') as f:
+                    recently_used = json.load(f)
+            else:
+                recently_used = []
+            
+            # Remove if already exists (to avoid duplicates) - compare relative paths
+            recently_used = [app for app in recently_used if app.get("sh_file") != sh_file_relative]
+            
+            # Add timestamp
+            app_info["last_used"] = datetime.now().isoformat()
+            
+            # Add to front
+            recently_used.insert(0, app_info)
+            
+            # Keep only last 10
+            recently_used = recently_used[:10]
+            
+            # Save to user's account directory
+            with open(self.recently_used_file, 'w') as f:
+                json.dump(recently_used, f, indent=2)
+                
+        except Exception as e:
+            print(f"Error tracking recently used app: {e}")
+    
+    def show_app_context_menu(self, event, app_data):
+        """Show context menu for an app"""
+        # Create a copy of app_data to avoid closure issues
+        app_data_copy = app_data.copy()
+        
+        menu = Menu(self.parent, tearoff=0)
+        menu.configure(
+            bg=self.theme.get_color("background_secondary", "#1A1A1A"),
+            fg=self.theme.get_color("text_primary", "#FFFFFF"),
+            activebackground=self.theme.get_color("primary", "#9D4EDD"),
+            activeforeground=self.theme.get_color("text_primary", "#FFFFFF"),
+            borderwidth=0,
+            font=self.theme.get_font("body_small", scaler=self.scaler)
+        )
+        
+        # Use separate functions to avoid immediate execution
+        def edit_app():
+            menu.destroy()
+            self.show_edit_app_popup(app_data_copy)
+        
+        def configure_commands():
+            menu.destroy()
+            self.open_sh_file_for_editing(app_data_copy)
+        
+        def delete_app():
+            menu.destroy()
+            self.delete_app(app_data_copy)
+        
+        menu.add_command(label="Edit app", command=edit_app)
+        menu.add_command(label="Configure commands", command=configure_commands)
+        menu.add_command(label="Delete app", command=delete_app)
+        
+        try:
+            # Show menu at cursor position with offset to prevent auto-selection
+            # Get current mouse position to ensure menu appears correctly
+            x = event.x_root
+            y = event.y_root
+            # Add offset to prevent menu from appearing directly under cursor
+            # which can cause the first item to be auto-selected when button is released
+            # Offset by several pixels to the right and down
+            
+            # Use update_idletasks to ensure everything is ready
+            self.parent.update_idletasks()
+            
+            # Show the menu using tk_popup
+            # This will keep the menu open until user selects an option or clicks outside
+            menu.tk_popup(x + 10, y + 10)
+            
+            # Add a small delay before allowing any close operations
+            # This prevents the menu from closing immediately after opening
+            menu_just_opened = {"value": True}
+            self.parent.after(100, lambda: menu_just_opened.update({"value": False}))
+            
+            # Add handler to close menu when clicking outside (only after initial delay)
+            def setup_close_handler():
+                root = self.parent.winfo_toplevel()
+                
+                def close_on_outside_click(event):
+                    # Don't close if menu was just opened
+                    if menu_just_opened.get("value", False):
+                        return
+                    
+                    try:
+                        if not menu.winfo_exists():
+                            return
+                        
+                        # Get menu bounds
+                        menu_x = menu.winfo_rootx()
+                        menu_y = menu.winfo_rooty()
+                        menu_w = menu.winfo_width()
+                        menu_h = menu.winfo_height()
+                        
+                        # Get click position
+                        click_x = event.x_root
+                        click_y = event.y_root
+                        
+                        # Check if click is outside menu (only for left clicks)
+                        if event.num == 1:  # Left click only
+                            if (click_x < menu_x or click_x > menu_x + menu_w or
+                                click_y < menu_y or click_y > menu_y + menu_h):
+                                menu.destroy()
+                                try:
+                                    root.unbind("<Button-1>")
+                                except:
+                                    pass
+                    except:
+                        pass
+                
+                # Only bind left click, not right click
+                root.bind("<Button-1>", close_on_outside_click, add="+")
+                
+                # Cleanup when menu is destroyed
+                def cleanup():
+                    try:
+                        root.unbind("<Button-1>")
+                    except:
+                        pass
+                
+                menu.bind("<Unmap>", lambda e: cleanup())
+            
+            # Setup close handler after menu is displayed
+            self.parent.after(150, setup_close_handler)
+            
+        except Exception as e:
+            print(f"Error showing context menu: {e}")
+            try:
+                menu.destroy()
+            except:
+                pass
+    
+    def show_edit_app_popup(self, app_data):
+        """Show popup to edit an app"""
+        popup = tk.Toplevel(self.parent)
+        popup.title("Edit App")
+        
+        # Scale popup size
+        popup_width = self.scaler.scale_dimension(500)
+        popup_height = self.scaler.scale_dimension(400)
+        popup.resizable(False, False)
+        
+        # Center on primary monitor
+        popup.transient(self.parent)
+        popup.grab_set()
+        
+        # Use the scaler instance we already have
+        x, y = self.scaler.center_on_primary_monitor(popup_width, popup_height)
+        popup.geometry(f'{popup_width}x{popup_height}+{x}+{y}')
+        
+        popup.update_idletasks()
+        
+        # Theme colors
+        bg_color = self.theme.get_color("background_secondary", "#1A1A1A")
+        text_color = self.theme.get_color("text_primary", "#FFFFFF")
+        text_secondary = self.theme.get_color("text_secondary", "#E0E0E0")
+        primary_color = self.theme.get_color("primary", "#9D4EDD")
+        input_bg = self.theme.get_color("input_background", "#1A1A1A")
+        input_text = self.theme.get_color("input_text", "#FFFFFF")
+        
+        popup.configure(bg=bg_color)
+        
+        # Variables - pre-fill with existing data (resolve paths for display)
+        app_name_var = tk.StringVar(value=app_data.get("name", ""))
+        app_image_path_var = tk.StringVar(value=self.to_absolute_path(app_data.get("image", "")))
+        
+        # Store original app data - resolve paths and keep original relative path for comparison
+        original_app_dir = Path(self.to_absolute_path(app_data.get("app_dir", "")))
+        original_sh_file_relative = app_data.get("sh_file", "")  # Keep the stored (relative) path for matching
+        original_sh_file = self.to_absolute_path(original_sh_file_relative)
+        
+        # Title
+        heading_font = self.theme.get_font("heading", scaler=self.scaler)
+        title_label = tk.Label(
+            popup,
+            text="Edit App",
+            font=heading_font,
+            bg=bg_color,
+            fg=text_color
+        )
+        title_label.pack(pady=(self.scaler.scale_padding(20), self.scaler.scale_padding(20)))
+        
+        # Form frame
+        form_frame = tk.Frame(popup, bg=bg_color)
+        form_frame.pack(padx=self.scaler.scale_padding(30), pady=self.scaler.scale_padding(10), fill=tk.BOTH, expand=True)
+        
+        # App name field
+        label_font = self.theme.get_font("label", scaler=self.scaler)
+        name_label = tk.Label(
+            form_frame,
+            text="App Name:",
+            font=label_font,
+            bg=bg_color,
+            fg=text_secondary,
+            anchor="w"
+        )
+        name_label.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(5)))
+        
+        body_font = self.theme.get_font("body", scaler=self.scaler)
+        name_entry = tk.Entry(
+            form_frame,
+            textvariable=app_name_var,
+            font=body_font,
+            bg=input_bg,
+            fg=input_text,
+            insertbackground=input_text,
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        name_entry.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(20)), ipady=self.scaler.scale_padding(5))
+        
+        # Image selection
+        image_label = tk.Label(
+            form_frame,
+            text="App Image:",
+            font=label_font,
+            bg=bg_color,
+            fg=text_secondary,
+            anchor="w"
+        )
+        image_label.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(5)))
+        
+        image_frame = tk.Frame(form_frame, bg=bg_color)
+        image_frame.pack(fill=tk.X, pady=(0, self.scaler.scale_padding(20)))
+        
+        image_entry = tk.Entry(
+            image_frame,
+            textvariable=app_image_path_var,
+            font=body_font,
+            bg=input_bg,
+            fg=input_text,
+            insertbackground=input_text,
+            relief=tk.SOLID,
+            borderwidth=1,
+            state="readonly"
+        )
+        image_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=self.scaler.scale_padding(5))
+        
+        def browse_image():
+            file_path = filedialog.askopenfilename(
+                parent=popup,
+                title="Select App Image",
+                filetypes=[
+                    ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                    ("All files", "*.*")
+                ]
+            )
+            if file_path:
+                app_image_path_var.set(file_path)
+        
+        browse_button = tk.Button(
+            image_frame,
+            text="Browse",
+            font=body_font,
+            command=browse_image,
+            bg=text_secondary,
+            fg=text_color,
+            cursor="hand2",
+            relief=tk.FLAT,
+            padx=self.scaler.scale_padding(15),
+            pady=self.scaler.scale_padding(5)
+        )
+        browse_button.pack(side=tk.LEFT, padx=(self.scaler.scale_padding(10), 0))
+        
+        # Status label
+        status_label = tk.Label(
+            form_frame,
+            text="",
+            font=label_font,
+            bg=bg_color,
+            fg=self.theme.get_color("text_error", "#E74C3C")
+        )
+        status_label.pack(pady=(0, self.scaler.scale_padding(10)))
+        
+        def save_changes():
+            app_name = app_name_var.get().strip()
+            image_path = app_image_path_var.get().strip()
+            
+            if not app_name:
+                status_label.config(text="Please enter an app name")
+                return
+            
+            try:
+                # Load existing apps
+                apps_list = self.load_apps_json()
+                
+                # Find and update the app - compare with the relative path
+                app_found = False
+                for app in apps_list:
+                    if app.get("sh_file") == original_sh_file_relative:
+                        # Update app name
+                        app["name"] = app_name
+                        
+                        # Update image if changed
+                        current_image_absolute = self.to_absolute_path(app.get("image", ""))
+                        if image_path and image_path != current_image_absolute:
+                            # Copy new image to assets folder
+                            assets_dir = original_app_dir / "assets"
+                            assets_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            # Delete old image
+                            old_image_path = Path(current_image_absolute)
+                            if old_image_path.exists():
+                                try:
+                                    old_image_path.unlink()
+                                except:
+                                    pass
+                            
+                            # Copy new image
+                            image_ext = Path(image_path).suffix
+                            image_filename = f"app_image{image_ext}"
+                            dest_image_path = assets_dir / image_filename
+                            shutil.copy2(image_path, dest_image_path)
+                            # Store as relative path
+                            app["image"] = self.to_relative_path(str(dest_image_path))
+                        
+                        app_found = True
+                        break
+                
+                if not app_found:
+                    status_label.config(text="App not found in library")
+                    return
+                
+                # Save apps
+                self.save_apps_json(apps_list)
+                
+                # Close popup and reload apps
+                popup.destroy()
+                self.load_apps()
+                
+                messagebox.showinfo("Success", f"App '{app_name}' updated successfully!")
+                
+            except Exception as e:
+                status_label.config(text=f"Error: {str(e)}")
+                print(f"Error editing app: {e}")
+        
+        # Save button
+        button_font = self.theme.get_font("button", scaler=self.scaler)
+        save_button = tk.Button(
+            form_frame,
+            text="Save Changes",
+            font=button_font,
+            command=save_changes,
+            bg=primary_color,
+            fg=text_color,
+            cursor="hand2",
+            relief=tk.FLAT,
+            padx=self.scaler.scale_padding(30),
+            pady=self.scaler.scale_padding(10)
+        )
+        save_button.pack(pady=(self.scaler.scale_padding(10), 0))
+    
+    def is_admin(self):
+        """Check if current user is an administrator"""
+        if not self.username:
+            return False
+        
+        account_dir = get_user_account_dir(self.username)
+        account_file = account_dir / "account.json"
+        
+        if account_file.exists():
+            try:
+                with open(account_file, 'r') as f:
+                    account_data = json.load(f)
+                account_type = account_data.get("account_type", "basic")
+                return account_type == "administrator"
+            except Exception as e:
+                print(f"Error checking admin status: {e}")
+                return False
+        return False
+    
+    def open_sh_file_for_editing(self, app_data):
+        """Open the .sh file in the default text editor"""
+        sh_file = self.to_absolute_path(app_data.get("sh_file", ""))
+        sh_path = Path(sh_file)
+        
+        if not sh_path.exists():
+            messagebox.showerror("Error", f"Script file not found:\n{sh_file}")
+            return
+        
+        try:
+            # Try to open with default editor
+            # First try xdg-open (Linux)
+            import platform
+            if platform.system() == "Linux":
+                # Suppress stderr to avoid editor warnings in terminal
+                subprocess.Popen(["xdg-open", str(sh_path)], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.Popen(["open", str(sh_path)], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            elif platform.system() == "Windows":
+                os.startfile(str(sh_path))
+            else:
+                # Fallback: try common editors
+                editors = ["gedit", "nano", "vim", "code", "kate"]
+                opened = False
+                for editor in editors:
+                    try:
+                        subprocess.Popen([editor, str(sh_path)], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                        opened = True
+                        break
+                    except:
+                        continue
+                if not opened:
+                    messagebox.showerror("Error", "Could not find a text editor to open the file.\n\nPlease manually open:\n" + str(sh_path))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open file:\n{str(e)}\n\nPlease manually open:\n{sh_path}")
+            print(f"Error opening file: {e}")
+    
+    def delete_app(self, app_data):
+        """Delete an app from the library"""
+        app_name = app_data.get("name", "Unknown App")
+        # Get the relative path for comparison and resolve absolute for deletion
+        sh_file_relative = app_data.get("sh_file", "")
+        app_dir = Path(self.to_absolute_path(app_data.get("app_dir", "")))
+        
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Delete App",
+            f"Are you sure you want to delete '{app_name}'?\n\nThis will permanently delete:\n- The app directory\n- The app image\n- The app's .sh file\n\nThis action cannot be undone.",
+            icon="warning"
+        )
+        
+        if not result:
+            return
+        
+        try:
+            # Load apps list
+            apps_list = self.load_apps_json()
+            
+            # Remove from apps list - compare with relative path
+            apps_list = [app for app in apps_list if app.get("sh_file") != sh_file_relative]
+            
+            # Save updated apps list
+            self.save_apps_json(apps_list)
+            
+            # Delete app directory and all contents
+            if app_dir.exists() and app_dir.is_dir():
+                shutil.rmtree(app_dir)
+            
+            # Remove from recently used (if exists in user's recently used)
+            if self.recently_used_file and self.recently_used_file.exists():
+                try:
+                    with open(self.recently_used_file, 'r') as f:
+                        recently_used = json.load(f)
+                    recently_used = [app for app in recently_used if app.get("sh_file") != sh_file_relative]
+                    with open(self.recently_used_file, 'w') as f:
+                        json.dump(recently_used, f, indent=2)
+                except:
+                    pass  # Ignore errors with recently used
+            
+            # Reload apps display
+            self.load_apps()
+            
+            messagebox.showinfo("Success", f"App '{app_name}' deleted successfully!")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete app:\n{str(e)}")
+            print(f"Error deleting app: {e}")
+    
+    def show(self):
+        """Show the frame"""
+        self.frame.pack(fill=tk.BOTH, expand=True)
+        # Reload apps when shown
+        self.load_apps()
+    
+    def hide(self):
+        """Hide the frame"""
+        self.frame.pack_forget()
